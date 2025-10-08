@@ -1,0 +1,79 @@
+name: 3 - Schedule ETL on ACI
+
+on:
+  schedule:
+  - cron: '01 03 * * *'  # Executa todos os dias às 00:01 no horário de Brasília (UTC+3)
+  workflow_dispatch: # Executa manualmente
+
+jobs:
+  run-container:
+    name: Executar ETL no ACI
+    runs-on: ubuntu-latest    
+      
+    env:
+      RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+      ACR_NAME: ${{ secrets.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      CONTAINER_NAME: ${{ secrets.ACR_REPOSITORY }}-job
+      IMAGE_NAME: ${{ secrets.ACR_REPOSITORY }}:latest
+
+    steps:
+    - name: Checkout do código
+      uses: actions/checkout@v3
+
+    - name: Login no Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Habilitar modo administrador no ACR
+      run: |
+        az acr update -n $ACR_NAME --admin-enabled true
+
+    - name: Obter credenciais do ACR
+      id: acr_creds
+      run: |
+        echo "username=$(az acr credential show --name $ACR_NAME --query "username" -o tsv)" >> $GITHUB_OUTPUT
+        echo "password=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)" >> $GITHUB_OUTPUT
+
+    - name: Executar container no ACI
+      run: |
+        az container create \
+          --resource-group "$RESOURCE_GROUP" \
+          --name "$CONTAINER_NAME" \
+          --image "$ACR_LOGIN_SERVER/$IMAGE_NAME" \
+          --registry-login-server "$ACR_LOGIN_SERVER" \
+          --registry-username "${{ steps.acr_creds.outputs.username }}" \
+          --registry-password "${{ steps.acr_creds.outputs.password }}" \
+          --secure-environment-variables AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+          --cpu 1 \
+          --memory 1.5 \
+          --restart Never \
+          --os-type Linux
+
+    
+    - name: Aguardar execução do container
+      run: |
+        echo "Aguardando execução do container..."
+        while true; do
+          STATUS=$(az container show \
+            --resource-group $RESOURCE_GROUP \
+            --name $CONTAINER_NAME \
+            --query "instanceView.state" -o tsv)
+          echo "Status atual: $STATUS"
+          if [ "$STATUS" == "Terminated" ] || [ "$STATUS" == "Succeeded" ] || [ "$STATUS" == "Failed" ]; then
+            break
+          fi
+          sleep 10
+        done
+
+    - name: Remover container após execução
+      run: |
+        echo "Removendo container..."
+        az container delete \
+          --resource-group $RESOURCE_GROUP \
+          --name $CONTAINER_NAME \
+          --yes
+
+
+

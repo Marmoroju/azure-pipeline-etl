@@ -1,0 +1,173 @@
+name: 1 - Provisionamento da Infraestrutura na Azure
+
+on:
+  workflow_dispatch:
+
+
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    outputs:
+      resource_group: ${{ steps.terraform_outputs.outputs.resource_group }}
+      etl_storage_account_name: ${{ steps.terraform_outputs.outputs.etl_storage_account_name }}
+      etl_container_name: ${{ steps.terraform_outputs.outputs.etl_container_name }}
+      tfstate_storage_account_name: ${{ steps.terraform_outputs.outputs.tfstate_storage_account_name }}
+      tftstate_container_name: ${{ steps.terraform_outputs.outputs.tftstate_container_name }}
+    
+
+          
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v3
+    
+      - name: login na Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Inicializar Terraform com backend remote
+        working-directory: ./terraform/infra
+        run: terraform init -backend-config=backend-config.hcl
+ 
+      - name: Validar Sintaxe e Formatação
+        working-directory: ./terraform/infra
+        run: |
+           terraform fmt -check
+           terraform validate         
+      
+      - name: Importar recursos existentes
+        working-directory: ./terraform/infra
+        env:
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+          STORAGE_ACCOUNT_TFSTATE: ${{ secrets.STORAGE_ACCOUNT_TFSTATE }}
+          STORAGE_ACCOUNT_ETL: ${{ secrets.STORAGE_ACCOUNT_ETL }}
+          CONTAINER_ETL: etldata
+          CONTAINER_TFSTATE: tfstate
+        run: |
+          echo "Verificando e importando recursos existentes..."
+        
+          RG_ID="/subscriptions/${TF_VAR_subscription_id}/resourceGroups/${RESOURCE_GROUP}"
+          
+          TFSTATE_SA_ID="${RG_ID}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_TFSTATE}"
+          
+          ETL_SA_ID="${RG_ID}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_ETL}"
+          
+          ETL_CONTAINER_ID="${RG_ID}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_ETL}/blobServices/default/containers/${CONTAINER_ETL}"
+          
+          TFSTATE_CONTAINER_ID="${RG_ID}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_TFSTATE}/blobServices/default/containers/${CONTAINER_TFSTATE}"
+        
+          # Resource Group
+          if terraform state list | grep -q azurerm_resource_group.rg; then
+            echo "Resource Group já está no estado."
+          else
+            echo "Importando Resource Group..."
+            terraform import azurerm_resource_group.rg "$RG_ID"
+          fi
+        
+          # Storage Account: tfstate
+          if terraform state list | grep -q azurerm_storage_account.tfstate; then
+            echo "Storage Account tfstate já está no estado."
+          else
+            echo "Importando Storage Account tfstate..."
+            terraform import azurerm_storage_account.tfstate "$TFSTATE_SA_ID"
+          fi
+
+          # Container: tfstate
+          if terraform state list | grep -q azurerm_storage_container.tfstate; then
+            echo "Container tfstate já está no estado."
+          else
+            echo "Importando Container tfstate..."
+            terraform import azurerm_storage_container.tfstate "$TFSTATE_CONTAINER_ID"
+          fi
+
+          # Storage Account: etldata
+          if terraform state list | grep -q azurerm_storage_account.etldata; then
+            echo "Storage Account etldata já está no estado."
+          else
+            echo "Importando Storage Account etldata..."
+            terraform import azurerm_storage_account.etldata "$ETL_SA_ID"
+          fi
+        
+          # Container: etldata
+          if terraform state list | grep -q azurerm_storage_container.etldata; then
+            echo "Container etldata já está no estado."
+          else
+            echo "Importando Container etldata..."
+            terraform import azurerm_storage_container.etldata "$ETL_CONTAINER_ID"
+          fi
+        
+
+        
+      - name: Terraform Plan
+        working-directory: ./terraform/infra
+        run: terraform plan -out=tfplan -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}"   
+      
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/master'
+        working-directory: ./terraform/infra
+        run: terraform apply -auto-approve tfplan
+    
+      - name: Exportar saídas do Terraform
+        id: terraform_outputs
+        working-directory: ./terraform/infra
+        run: |
+          echo "resource_group=$(terraform output -raw resource_group)" >> $GITHUB_OUTPUT          
+          echo "etl_storage_account_name=$(terraform output -raw etl_storage_account_name)" >> $GITHUB_OUTPUT
+          echo "etl_container_name=$(terraform output -raw etl_container_name)" >> $GITHUB_OUTPUT
+          echo "tfstate_storage_account_name=$(terraform output -raw tfstate_storage_account_name)" >> $GITHUB_OUTPUT
+          echo "tftstate_container_name=$(terraform output -raw tftstate_container_name)" >> $GITHUB_OUTPUT
+
+    
+        
+  pipeline:
+    runs-on: ubuntu-latest
+    needs: infra
+    outputs:
+      acr_name: ${{ steps.terraform_outputs.outputs.acr_name }}
+      acr_login_server: ${{ steps.terraform_outputs.outputs.acr_login_server }}
+
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v3
+    
+      - name: login na Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Inicializar Terraform com backend remote
+        working-directory: ./terraform/pipeline
+        run: terraform init -backend-config=backend-config.hcl
+ 
+      - name: Validar Sintaxe e Formatação
+        working-directory: ./terraform/pipeline
+        run: |
+           terraform fmt -check
+           terraform validate         
+      
+      - name: Terraform Plan
+        working-directory: ./terraform/pipeline
+        run: terraform plan -out=tfplan -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}"   
+         
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/master'
+        working-directory: ./terraform/pipeline
+        run: terraform apply -auto-approve tfplan
+    
+      - name: Exportar saídas do Terraform
+        id: terraform_outputs
+        working-directory: ./terraform/pipeline
+        run: |
+          echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
+          echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
+
+

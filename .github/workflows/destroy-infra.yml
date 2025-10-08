@@ -1,0 +1,83 @@
+name: 4 - Destruir infraestrutura na Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      destroy:
+        description: 'Destruir a infraestrutura?'
+        required: true
+        default: 'false'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    if: ${{ github.event.inputs.destroy == 'true' }}
+    name: Destruir toda a infraestrutura
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+      ACR_NAME: ${{ secrets.ACR_NAME }}
+
+    steps:
+    - name: Checkout do código
+      uses: actions/checkout@v3
+
+    - name: Login no Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Instalar Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    # Destruir ACR (pipeline)
+    - name: Inicializar Terraform (pipeline)
+      working-directory: ./terraform/pipeline
+      run: terraform init -backend-config=backend-config.hcl
+
+    - name: Terraform Destroy (pipeline)
+      working-directory: ./terraform/pipeline
+      env:
+        TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      run: terraform destroy -auto-approve
+
+    # Verificar e remover ACR manualmente (fallback)
+    - name: Remover Container Registry manualmente (fallback)
+      run: |
+        echo "Verificando se o ACR '$ACR_NAME' ainda existe..."
+        if az acr show --name $ACR_NAME --resource-group $RESOURCE_GROUP &> /dev/null; then
+          echo "ACR ainda existe. Removendo manualmente..."
+          az acr delete --name $ACR_NAME --resource-group $RESOURCE_GROUP --yes
+        else
+          echo "ACR já foi removido."
+        fi
+
+    # Verificar se o Resource Group ainda existe antes de destruir a infra
+    - name: Verificar existência do Resource Group
+      id: rg_check
+      run: |
+        echo "Verificando se o grupo de recursos '$RESOURCE_GROUP' ainda existe..."
+        if az group show --name $RESOURCE_GROUP &> /dev/null; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Destruir Backend (infra) somente se o Resource Group existir
+    - name: Inicializar Terraform (infra)
+      if: steps.rg_check.outputs.exists == 'true'
+      working-directory: ./terraform/infra
+      run: terraform init -backend-config=backend-config.hcl
+
+    # Mesmo com erro, toda a infra será destruída.
+    - name: Terraform Destroy (infra)
+      if: steps.rg_check.outputs.exists == 'true'
+      continue-on-error: true
+      working-directory: ./terraform/infra
+      env:
+        TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      run: terraform destroy -auto-approve    
+
